@@ -70,3 +70,9 @@ routes, PKCE S256, le cookie `__Host-SESSION`, l'origine du front, Origin + CSRF
 session sans token, les erreurs (401, 404, 409, 502, 503), la deconnexion, le back-channel (hors CSRF), le verrou de
 refresh (refresh unique, attente et relecture, delai, erreur reseau), le registre `sid` (suppression ciblee, rejeu
 `jti`) et la validation de la configuration. Redis, Keycloak et plusieurs replicas reels : mode pile (SEC-BFF).
+
+## Image
+
+`cicd/openshift/Dockerfile` : UBI 8 OpenJDK 21 runtime, `USER 185`, `-XX:MaxRAMPercentage=75`, contexte = le jar seul
+(`.dockerignore`). Meme Dockerfile en CI (BuildConfig) et en mode pile (`gitops-platform/local/stack`, instance
+`web-bff-customers` derriere APISIX externe, API par APISIX interne).
