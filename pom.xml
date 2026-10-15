@@ -43,6 +43,12 @@
 			<artifactId>spring-boot-configuration-processor</artifactId>
 			<optional>true</optional>
 		</dependency>
+		<!-- DB7 : RestClient.Builder de Boot (Boot 4 : module separe ; en test, apporte par webmvc-test, ce qui masquait
+		     son absence) avec l'observation : traceparent propage jusqu'a l'API -->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-restclient</artifactId>
+		</dependency>
 		<!-- DB4 : client OIDC (oauth2Login, refresh, back-channel logout) -->
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
