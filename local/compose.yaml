@@ -1,0 +1,29 @@
+# Mode dev : Redis des sessions pour le BFF lance par mvn sur l'hote. Jamais deploye.
+# Comme en cible (DB5) : sans persistance, noeviction, compte default desactive, un utilisateur ACL par instance
+# limite a ses cles (~<instance>:*), sans commandes dangereuses (KEYS, FLUSHALL, CONFIG...).
+#   docker compose -f local/compose.yaml --env-file local/.env up -d
+name: web-bff-local
+
+services:
+  redis:
+    # Epinglee par digest (tag c9s) : meme image que les autres depots
+    image: quay.io/sclorg/redis-7-c9s@sha256:d772acab11507231a2b152850f47c8b9b859dedb6652ca624949e97cb28c5e6f
+    environment:
+      BFF_INSTANCE: ${BFF_INSTANCE:?BFF_INSTANCE absent - copier local/.env.example en local/.env}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD absent - copier local/.env.example en local/.env}
+    # Variables lues dans le conteneur ($$ : pas d'interpolation par Compose) : le mot de passe reste hors du fichier
+    command:
+      - bash
+      - -c
+      - >-
+        exec redis-server --save '' --appendonly no --maxmemory 64mb --maxmemory-policy noeviction
+        --user default off
+        --user "$$BFF_INSTANCE" on ">$$REDIS_PASSWORD" "~$$BFF_INSTANCE:*" '&*' +@all -@dangerous +info
+    ports:
+      # Expose uniquement sur la machine locale
+      - "127.0.0.1:6379:6379"
+    healthcheck:
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$REDIS_PASSWORD\" redis-cli --user \"$$BFF_INSTANCE\" ping | grep -q PONG"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
