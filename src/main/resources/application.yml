@@ -1,0 +1,114 @@
+# web-bff : une image, une instance par realm (DB2). Toute la configuration vient de l'environnement (12-factor) :
+# une variable obligatoire absente arrete le demarrage (BffProperties, @Validated) avec son nom, jamais sa valeur.
+server:
+  port: ${SERVER_PORT:8080}
+  servlet:
+    context-path: /bff
+  # Origine du front reconstruite depuis Host / X-Forwarded-* (APISIX externe, proxy Vite en dev) : redirect URI par front
+  forward-headers-strategy: framework
+
+bff:
+  # Nom de l'instance : prefixe des cles Redis et utilisateur ACL (web-bff-customers, web-bff-internal)
+  instance: ${BFF_INSTANCE}
+  oidc:
+    # Emetteur public (iss verifie, endpoints du navigateur) et URL interne (endpoints appeles par le serveur)
+    issuer-uri: ${OIDC_ISSUER_URI}
+    internal-uri: ${OIDC_INTERNAL_URI}
+    client-id: ${OIDC_CLIENT_ID:web-bff}
+    client-secret: ${OIDC_CLIENT_SECRET}
+    scopes: ${OIDC_SCOPES:openid,profile,email,donation:read,donation:write}
+  # Origines des fronts autorises a envoyer des mutations (DB8), separees par des virgules
+  allowed-origins: ${BFF_ALLOWED_ORIGINS}
+  # APISIX interne (dev : l'API directement)
+  api-base-url: ${API_BASE_URL}
+  session:
+    idle-timeout: ${SESSION_IDLE_TIMEOUT:30m}
+    absolute-timeout: ${SESSION_ABSOLUTE_TIMEOUT:10h}
+  refresh:
+    # DB6 : refresh 30 s avant expiration ; verrou Redis par session (obligatoire, spike SB4)
+    clock-skew: 30s
+    lock-ttl: 5s
+    wait-step: 100ms
+    max-wait: 5s
+
+spring:
+  application:
+    # En dur : pas de filtrage Maven @...@ (craft-parent n'herite pas de spring-boot-starter-parent)
+    name: web-bff
+  profiles:
+    default: local
+  config:
+    # Dev local : memes variables que local/compose.yaml (repertoire de travail = racine du depot)
+    import: optional:file:local/.env[.properties]
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      # Utilisateur ACL = nom de l'instance (limite a ses cles)
+      username: ${bff.instance}
+      password: ${REDIS_PASSWORD}
+
+logging:
+  level:
+    root: INFO
+    ma.myc: INFO
+    org.springframework.security: INFO
+  structured:
+    ecs:
+      service:
+        environment: ${SPRING_PROFILES_ACTIVE:local}
+        node-name: ${HOSTNAME:}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+      base-path: /management
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: never
+  # --- OpenTelemetry (OTLP) : desactive par defaut (local, tests), active par l'overlay (comme l'API) ---
+  tracing:
+    sampling:
+      probability: ${TRACING_SAMPLING_PROBABILITY:1.0}
+    export:
+      otlp:
+        enabled: ${OTLP_EXPORT_ENABLED:false}
+  otlp:
+    metrics:
+      export:
+        enabled: ${OTLP_EXPORT_ENABLED:false}
+        url: ${OTLP_ENDPOINT:http://localhost:4318}/v1/metrics
+        step: 30s
+  logging:
+    export:
+      otlp:
+        enabled: ${OTLP_EXPORT_ENABLED:false}
+  opentelemetry:
+    resource-attributes:
+      service.namespace: web
+      service.instance.name: ${bff.instance}
+      service.version: ${spring.application.version:unknown}
+      deployment.environment.name: ${SPRING_PROFILES_ACTIVE:local}
+    tracing:
+      export:
+        otlp:
+          endpoint: ${OTLP_ENDPOINT:http://localhost:4318}/v1/traces
+    logging:
+      export:
+        otlp:
+          endpoint: ${OTLP_ENDPOINT:http://localhost:4318}/v1/logs
+
+---
+spring:
+  config:
+    activate:
+      on-profile: '!local'
+logging:
+  structured:
+    format:
+      # Logs as Event Streams : un evenement JSON (ECS) par ligne sur stdout
+      console: ecs

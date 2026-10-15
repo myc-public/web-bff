@@ -1,0 +1,14 @@
+# Profil "test" : valeurs factices, sessions en memoire (TestSessionConfig), aucun Redis ni Keycloak joint
+bff:
+  instance: web-bff-test
+  oidc:
+    issuer-uri: https://front.example/realms/myc-customers
+    internal-uri: http://keycloak:8080/realms/myc-customers
+    client-id: web-bff
+    client-secret: secret-de-test
+  allowed-origins: http://localhost,https://front.example
+  api-base-url: http://api.test
+spring:
+  data:
+    redis:
+      password: test
