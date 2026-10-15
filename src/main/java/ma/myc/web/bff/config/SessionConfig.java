@@ -1,5 +1,6 @@
 package ma.myc.web.bff.config;
 
+import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Profile;
@@ -9,6 +10,9 @@ import org.springframework.session.data.redis.RedisSessionRepository;
 import org.springframework.session.data.redis.config.annotation.web.http.EnableRedisHttpSession;
 import org.springframework.session.web.http.CookieSerializer;
 import org.springframework.session.web.http.DefaultCookieSerializer;
+import org.springframework.session.web.http.SessionRepositoryFilter;
+
+import ma.myc.web.bff.security.SessionStoreUnavailableFilter;
 
 /**
  * DB5 : sessions dans Redis, sous le prefixe de l'instance. Ecriture immediate : le verrou de refresh (DB6) relit
@@ -28,6 +32,15 @@ public class SessionConfig {
 		SessionRepositoryCustomizer<RedisSessionRepository> idleTimeout(BffProperties props) {
 			return repository -> repository.setDefaultMaxInactiveInterval(props.session().idleTimeout());
 		}
+	}
+
+	/** SEC-BFF-12 : Redis plein ou injoignable -> 503 ; enregistre juste avant SessionRepositoryFilter (autour de lui). */
+	@Bean
+	FilterRegistrationBean<SessionStoreUnavailableFilter> sessionStoreUnavailableFilter() {
+		FilterRegistrationBean<SessionStoreUnavailableFilter> registration =
+				new FilterRegistrationBean<>(new SessionStoreUnavailableFilter());
+		registration.setOrder(SessionRepositoryFilter.DEFAULT_ORDER - 1);
+		return registration;
 	}
 
 	/** Cookie __Host-SESSION : Path=/ malgre le contexte /bff, Secure, HttpOnly, Lax, identifiant brut (pas de base64). */
