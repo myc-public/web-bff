@@ -1,0 +1,15 @@
+target/
+
+### IDE ###
+.idea
+*.iws
+*.iml
+*.ipr
+.vscode/
+.classpath
+.factorypath
+.project
+.settings
+
+### Environnement local (secrets) : jamais commite, modele local/.env.example versionne ###
+local/.env
