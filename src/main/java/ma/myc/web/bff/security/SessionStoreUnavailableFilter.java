@@ -15,8 +15,8 @@ import org.springframework.web.filter.OncePerRequestFilter;
 
 /**
  * SEC-BFF-12 : magasin de sessions (Redis) plein ou injoignable -> 503, sans detail interne, au lieu d'un 500. Place
- * autour de SessionRepositoryFilter : couvre aussi les erreurs levees dans les filtres de securite (creation de la
- * session a la connexion) et l'ecriture de la session en fin de requete.
+ * autour de SessionRepositoryFilter : couvre l'ecriture de la session en fin de requete et les erreurs non
+ * interceptees par la securite (la redirection vers Keycloak a son propre gestionnaire : SessionStoreFailureHandler).
  */
 public class SessionStoreUnavailableFilter extends OncePerRequestFilter {
 
@@ -30,16 +30,25 @@ public class SessionStoreUnavailableFilter extends OncePerRequestFilter {
 			chain.doFilter(request, response);
 		}
 		catch (ServletException | IOException | RuntimeException e) {
-			DataAccessException cause = dataAccessCause(e);
-			if (cause == null || response.isCommitted()) {
+			if (!writeIfSessionStoreFailure(e, request, response)) {
 				throw e;
 			}
-			log.warn("sessions.indisponibles cause={} uri={}", cause.getClass().getSimpleName(), request.getRequestURI());
-			response.resetBuffer();
-			response.setStatus(HttpServletResponse.SC_SERVICE_UNAVAILABLE);
-			response.setContentType(MediaType.APPLICATION_PROBLEM_JSON_VALUE);
-			response.getWriter().write(BODY);
 		}
+	}
+
+	/** Erreur Redis dans la chaine des causes et reponse pas encore envoyee : 503 ecrit, true. Sinon false. */
+	static boolean writeIfSessionStoreFailure(Throwable e, HttpServletRequest request, HttpServletResponse response)
+			throws IOException {
+		DataAccessException cause = dataAccessCause(e);
+		if (cause == null || response.isCommitted()) {
+			return false;
+		}
+		log.warn("sessions.indisponibles cause={} uri={}", cause.getClass().getSimpleName(), request.getRequestURI());
+		response.resetBuffer();
+		response.setStatus(HttpServletResponse.SC_SERVICE_UNAVAILABLE);
+		response.setContentType(MediaType.APPLICATION_PROBLEM_JSON_VALUE);
+		response.getWriter().write(BODY);
+		return true;
 	}
 
 	private static DataAccessException dataAccessCause(Throwable e) {

@@ -10,6 +10,7 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.http.HttpStatus;
+import org.springframework.security.config.ObjectPostProcessor;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.oauth2.client.AuthorizationCodeOAuth2AuthorizedClientProvider;
 import org.springframework.security.oauth2.client.DelegatingOAuth2AuthorizedClientProvider;
@@ -20,6 +21,7 @@ import org.springframework.security.oauth2.client.oidc.web.logout.OidcClientInit
 import org.springframework.security.oauth2.client.registration.ClientRegistrationRepository;
 import org.springframework.security.oauth2.client.web.DefaultOAuth2AuthorizedClientManager;
 import org.springframework.security.oauth2.client.web.HttpSessionOAuth2AuthorizedClientRepository;
+import org.springframework.security.oauth2.client.web.OAuth2AuthorizationRequestRedirectFilter;
 import org.springframework.security.oauth2.client.web.OAuth2AuthorizedClientRepository;
 import org.springframework.security.oauth2.core.oidc.user.OidcUser;
 import org.springframework.security.web.SecurityFilterChain;
@@ -38,6 +40,7 @@ import ma.myc.web.bff.security.OriginFilter;
 import ma.myc.web.bff.security.RedisOidcSessionRegistry;
 import ma.myc.web.bff.security.RedisRefreshLock;
 import ma.myc.web.bff.security.RefreshLock;
+import ma.myc.web.bff.security.SessionStoreFailureHandler;
 
 /**
  * Securite du BFF (ADR K6 : DB4 a DB9, precisions du spike du 13/10).
@@ -129,6 +132,14 @@ public class SecurityConfig {
 				.failureHandler((request, response, exception) -> {
 					log.warn("connexion.echec cause={}", exception.getMessage());
 					response.sendRedirect("/?connexion=echec");
+				})
+				// SEC-BFF-12 : Redis plein a la creation de la session -> 503 (au lieu du 500 du gestionnaire par defaut)
+				.withObjectPostProcessor(new ObjectPostProcessor<OAuth2AuthorizationRequestRedirectFilter>() {
+					@Override
+					public <O extends OAuth2AuthorizationRequestRedirectFilter> O postProcess(O filter) {
+						filter.setAuthenticationFailureHandler(new SessionStoreFailureHandler());
+						return filter;
+					}
 				}))
 			.oauth2Client(client -> { })
 			.oidcLogout(logout -> logout.backChannel(backChannel -> { }))
