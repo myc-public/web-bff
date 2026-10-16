@@ -29,12 +29,15 @@ import org.springframework.security.oauth2.client.ClientAuthorizationException;
 import org.springframework.security.oauth2.client.oidc.session.OidcSessionRegistry;
 import org.springframework.security.oauth2.client.registration.ClientRegistration;
 import org.springframework.security.oauth2.client.registration.ClientRegistrationRepository;
+import org.springframework.security.oauth2.client.web.OAuth2AuthorizationRequestRedirectFilter;
 import org.springframework.security.oauth2.core.OAuth2Error;
 import org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.OidcLoginRequestPostProcessor;
+import org.springframework.security.web.FilterChainProxy;
 import org.springframework.session.Session;
 import org.springframework.session.SessionRepository;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
+import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
@@ -48,6 +51,7 @@ import ma.myc.web.bff.config.SessionConfig;
 import ma.myc.web.bff.client.DonorCreate;
 import ma.myc.web.bff.client.DonorView;
 import ma.myc.web.bff.security.RefreshLock;
+import ma.myc.web.bff.security.SessionStoreFailureHandler;
 
 /** Chaine de securite complete par MockMvc (contexte /bff), sans Keycloak ni Redis : SB2, SB3, SB6, SB7, DB8, DB9. */
 @SpringBootTest
@@ -67,6 +71,9 @@ class SecurityFlowTest {
 
 	@Autowired
 	SessionRepository<? extends Session> sessions;
+
+	@Autowired
+	FilterChainProxy filterChain;
 
 	@MockitoBean
 	DonationApiClient api;
@@ -327,5 +334,19 @@ class SecurityFlowTest {
 	@Test
 	void sonde_liveness_publique() throws Exception {
 		mvc.perform(bff(get("/bff/management/health/liveness"))).andExpect(status().isOk());
+	}
+
+	/** SEC-BFF-12 : la redirection vers Keycloak utilise le gestionnaire 503 (le defaut de Spring repond 500). */
+	@Test
+	void redirection_vers_keycloak_utilise_le_gestionnaire_redis_indisponible() {
+		OAuth2AuthorizationRequestRedirectFilter filter = filterChain.getFilterChains().stream()
+			.flatMap(chain -> chain.getFilters().stream())
+			.filter(OAuth2AuthorizationRequestRedirectFilter.class::isInstance)
+			.map(OAuth2AuthorizationRequestRedirectFilter.class::cast)
+			.findFirst()
+			.orElseThrow();
+
+		assertThat(ReflectionTestUtils.getField(filter, "authenticationFailureHandler"))
+			.isInstanceOf(SessionStoreFailureHandler.class);
 	}
 }

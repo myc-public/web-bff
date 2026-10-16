@@ -47,6 +47,12 @@ spring:
       # Utilisateur ACL = nom de l'instance (limite a ses cles)
       username: ${bff.instance}
       password: ${REDIS_PASSWORD}
+  # SEC-BFF-15c : appels a l'API (APISIX interne) bornes ; depasse -> 503 api-indisponible, bien avant le delai
+  # d'APISIX externe (60 s). Sans delai, une IP qui ne repond plus bloquait la requete ~2 min.
+  http:
+    clients:
+      connect-timeout: 2s
+      read-timeout: 10s
 
 logging:
   level:
