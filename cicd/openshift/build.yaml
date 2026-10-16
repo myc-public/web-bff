@@ -1,0 +1,36 @@
+# Build d'image a partir du JAR (build binaire), applique par la pipeline (stage "Build Image").
+# Namespace = celui du ServiceAccount Jenkins. Le nom doit correspondre a gitops.app (jenkins.properties).
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: web-bff
+  labels:
+    app: web-bff
+---
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: web-bff
+  labels:
+    app: web-bff
+spec:
+  runPolicy: Serial
+  successfulBuildsHistoryLimit: 5
+  failedBuildsHistoryLimit: 5
+
+  source:
+    type: Binary
+    binary: {}
+
+  strategy:
+    type: Docker
+    dockerStrategy:
+      from:
+        kind: ImageStreamTag
+        namespace: openshift
+        name: ubi8-openjdk-21-runtime:1.18
+
+  output:
+    to:
+      kind: ImageStreamTag
+      name: web-bff:latest

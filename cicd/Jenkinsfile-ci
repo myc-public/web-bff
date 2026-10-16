@@ -1,0 +1,518 @@
+#!/usr/bin/env groovy
+
+final jenkinsProperties = 'cicd/jenkins.properties'
+APPLICATION_NAME = ""
+APPLICATION_GROUPID = ""
+GIT_REPO = ""
+NOTIFICATION_MAIL = ""
+ARTIFACT_ID = ""
+ARTIFACT_GROUPID = ""
+ARTIFACT_PACKAGING = ""
+ARTIFACT_FILE = ""
+ARTIFACT_SHA256 = ""
+TARGET_BRANCH = ""
+RELEASE_TYPE = ""
+GITOPS_URL = ""
+GITOPS_APP = ""
+SONAR_PROJECT_KEY = ""
+GITOPS_ENV = ""
+IMAGE_TAG = ""
+IMAGE_DIGEST = ""
+OPENSHIFT_NAMESPACE = ""
+
+pipeline {
+    agent {
+        kubernetes {
+            cloud 'openshift'
+            inheritFrom 'java-maven'
+            agentContainer 'maven'
+            agentInjection true
+        }
+    }
+
+    options {
+        timestamps()
+        timeout(time: 20, unit: 'MINUTES')
+        disableConcurrentBuilds()
+        skipDefaultCheckout(true)
+    }
+
+    parameters {
+        choice(name: 'BRANCH', choices: ['develop', 'uat', 'preprod', 'main'], description: 'Git Branch to be used by the build')
+    }
+
+    stages {
+
+
+        // Doit passer AVANT le checkout : la branche choisie determine quoi cloner
+        // et le type d'artefact (main -> RELEASE / maven-releases, sinon SNAPSHOT / maven-snapshots).
+        stage('Init Parameters') {
+            steps {
+                script {
+                    def allowedBranches = ['develop', 'uat', 'preprod', 'main']
+                    if (!(params.BRANCH in allowedBranches)) {
+                        error("Parametre BRANCH invalide : '${params.BRANCH}' (attendu : ${allowedBranches.join(', ')})")
+                    }
+                    TARGET_BRANCH = params.BRANCH
+                    RELEASE_TYPE  = (TARGET_BRANCH == 'main') ? 'RELEASE' : 'SNAPSHOT'
+                    isSnapshotVersion = (RELEASE_TYPE == 'SNAPSHOT')
+                    echo "Branche GitHub : ${TARGET_BRANCH} | Type d'artefact : ${RELEASE_TYPE} | Repository Nexus : ${isSnapshotVersion ? 'maven-snapshots' : 'maven-releases'}"
+                }
+            }
+        }
+
+        stage('Workspace Cleanup') {
+            steps {
+                echo 'Nettoyage du workspace avant build'
+                deleteDir()
+            }
+        }
+
+        stage('Checkout') {
+            steps {
+                checkout([
+                    $class: 'GitSCM',
+                    branches: [[name: "*/${TARGET_BRANCH}"]],
+                    userRemoteConfigs: scm.userRemoteConfigs,
+                    extensions: [[$class: 'LocalBranch', localBranch: TARGET_BRANCH]]
+                ])
+                script {
+                    def POM = readMavenPom file: 'pom.xml'
+                    def pomVersion = "${POM.version}".toString()
+                    echo "Version (pom.xml) : ${pomVersion}"
+
+                    // Version publiee = version de base du pom + suffixe impose par la branche
+                    def baseVersion = pomVersion.replaceFirst(/(?i)[-.](SNAPSHOT|RELEASE)$/, '')
+                    VERSION = "${baseVersion}-${RELEASE_TYPE}".toString()
+                    echo "Version publiee : ${VERSION}"
+                }
+            }
+        }
+
+        stage('Set Version') {
+            when {
+                expression { readMavenPom(file: 'pom.xml').version != VERSION }
+            }
+            steps {
+                configFileProvider([configFile(fileId: 'nexus-maven-settings', variable: 'MAVEN_SETTINGS')]) {
+                    withCredentials([usernamePassword(credentialsId: 'nexus-credentials', usernameVariable: 'NEXUS_USERNAME', passwordVariable: 'NEXUS_PASSWORD')]) {
+                        // Modifie le pom du workspace uniquement (rien n'est recommite dans git)
+                        sh "mvn --settings \$MAVEN_SETTINGS -B org.codehaus.mojo:versions-maven-plugin:2.17.1:set -DnewVersion=${VERSION} -DgenerateBackupPoms=false"
+                    }
+                }
+            }
+        }
+
+        stage('Init environment') {
+            steps {
+                script {
+                    def props = readProperties file: jenkinsProperties
+                    APPLICATION_NAME    = props["application.name"]?.trim()
+                    APPLICATION_GROUPID = props["application.groupId"]?.trim()
+                    GIT_REPO            = props["git.url"]?.trim()
+                    NOTIFICATION_MAIL   = props["notification.email"]?.trim()
+                    GITOPS_URL          = props["gitops.url"]?.trim()
+                    GITOPS_APP          = props["gitops.app"]?.trim()
+                    SONAR_PROJECT_KEY   = props["sonar.projectKey"]?.trim()
+                    if (!GITOPS_URL || !GITOPS_APP || !SONAR_PROJECT_KEY) {
+                        error("gitops.url, gitops.app et sonar.projectKey doivent etre renseignes dans cicd/jenkins.properties")
+                    }
+                    GIT_BRANCH          = TARGET_BRANCH
+                    echo "Repo (jenkins.properties) : ${GIT_REPO}"
+                    echo "Branche demandée (paramètre BRANCH) : ${GIT_BRANCH}"
+                }
+            }
+        }
+
+        stage('Toolchain Validation') {
+            steps {
+                script {
+                    def javaVersionOutput = sh(script: 'java -version 2>&1', returnStdout: true).trim()
+                    echo javaVersionOutput
+                    def allowedJavaVersions = ['"17.', '"21.']
+                    if (!allowedJavaVersions.any { javaVersionOutput.contains(it) }) {
+                        error("Java 17 ou 21 requis - version detectee: ${javaVersionOutput.readLines()[0]}")
+                    }
+
+                    def mvnVersionOutput = sh(script: 'mvn --version', returnStdout: true).trim()
+                    echo mvnVersionOutput
+                }
+            }
+        }
+
+        stage('Build project') {
+            steps {
+                configFileProvider([configFile(fileId: 'nexus-maven-settings', variable: 'MAVEN_SETTINGS')]) {
+                    withCredentials([usernamePassword(credentialsId: 'nexus-credentials', usernameVariable: 'NEXUS_USERNAME', passwordVariable: 'NEXUS_PASSWORD')]) {
+                        sh 'mvn --settings $MAVEN_SETTINGS clean verify -batch-mode -U'
+                    }
+                }
+            }
+            post {
+                always {
+                    junit testResults: 'target/surefire-reports/*.xml', allowEmptyResults: true
+                }
+            }
+        }
+
+        stage('Sonar Code analysis') {
+            steps {
+                configFileProvider([configFile(fileId: 'nexus-maven-settings', variable: 'MAVEN_SETTINGS')]) {
+                    withCredentials([usernamePassword(credentialsId: 'nexus-credentials', usernameVariable: 'NEXUS_USERNAME', passwordVariable: 'NEXUS_PASSWORD')]) {
+                        // Limite connue : SonarCloud (plan gratuit) refuse l'analyse des branches autres que la principale
+                        // (403 "Organization is not allowed to access data from non main branches") => pas de sonar.branch.name.
+                        // Toute analyse (develop compris) est rangee dans la branche principale du projet : le Quality Gate
+                        // reste bloquant a chaque build, mais l'historique Sonar ne distingue pas les branches.
+                        // Quality Gate verifie par le scanner lui-meme (polling synchrone, echec du build si KO).
+                        // TODO: plan SonarCloud Enterprise -> webhook vers <jenkins>/sonarqube-webhook/ (+ webhookSecretId
+                        //       en JCasC/Terraform), puis revenir a un stage 'Sonar Quality Gate' avec waitForQualityGate.
+                        withSonarQubeEnv('sonarqube') {
+                          withEnv(["SONAR_PROJECT_KEY=${SONAR_PROJECT_KEY}"]) {
+                            sh '''
+                                mvn --settings $MAVEN_SETTINGS org.sonarsource.scanner.maven:sonar-maven-plugin:5.8.0.7211:sonar -batch-mode \
+                                    -Dsonar.organization=myc-public \
+                                    -Dsonar.projectKey="$SONAR_PROJECT_KEY" \
+                                    -Dsonar.qualitygate.wait=true \
+                                    -Dsonar.qualitygate.timeout=300
+                            '''
+                          }
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Tagging') {
+            when {
+                expression { params.BRANCH == 'main' }
+            }
+            steps {
+                echo """
+                ================================================================
+                Tagging de release DESACTIVE pour l'instant.
+                Pre-requis avant activation (cf. audit CI/CD Blueprint) :
+                  1. Compte de service Git dedie (pas d'identite personnelle)
+                  2. Credential Jenkins pour ce compte de service
+                  3. Politique de tags immuables (pas de delete + recreate)
+                  4. Validation du format de version (x.y.z) avant tag
+                  5. Commit retour du pom.xml apres retrait du -SNAPSHOT
+                ================================================================
+                """
+            }
+        }
+
+        stage('Verify Artifact') {
+            steps {
+                script {
+                    def pom = readMavenPom file: 'pom.xml'
+                    ARTIFACT_ID        = pom.artifactId
+                    ARTIFACT_GROUPID   = pom.groupId ?: pom.parent.groupId
+                    ARTIFACT_PACKAGING = pom.packaging ?: 'jar'
+
+                    if (!(VERSION ==~ /\d+\.\d+\.\d+-(SNAPSHOT|RELEASE)/) || !VERSION.endsWith("-${RELEASE_TYPE}")) {
+                        error("Version '${VERSION}' invalide : format attendu x.y.z-${RELEASE_TYPE} pour la branche ${TARGET_BRANCH}")
+                    }
+
+                    ARTIFACT_FILE = "target/${ARTIFACT_ID}-${VERSION}.${ARTIFACT_PACKAGING}"
+                    if (!fileExists(ARTIFACT_FILE)) {
+                        error("Artefact introuvable : ${ARTIFACT_FILE} (build incomplet ?)")
+                    }
+                    def size = sh(script: "stat -c %s ${ARTIFACT_FILE}", returnStdout: true).trim() as long
+                    if (size == 0) {
+                        error("Artefact vide : ${ARTIFACT_FILE}")
+                    }
+                    sh "jar tf ${ARTIFACT_FILE} > /dev/null"
+                    echo "Artefact verifie : ${ARTIFACT_FILE} (${size} octets)"
+                }
+            }
+        }
+
+        stage('Checksum & Metadata') {
+            steps {
+                script {
+                    ARTIFACT_SHA256 = sh(script: "sha256sum ${ARTIFACT_FILE} | cut -d' ' -f1", returnStdout: true).trim()
+                    writeFile file: "${ARTIFACT_FILE}.sha256", text: "${ARTIFACT_SHA256}  ${ARTIFACT_FILE.tokenize('/').last()}\n"
+
+                    def gitCommit = sh(script: 'git rev-parse HEAD', returnStdout: true).trim()
+                    def buildTimestamp = sh(script: 'date -u +%Y-%m-%dT%H:%M:%SZ', returnStdout: true).trim()
+                    def buildInfo = """\
+artifact.groupId=${ARTIFACT_GROUPID}
+artifact.artifactId=${ARTIFACT_ID}
+artifact.version=${VERSION}
+artifact.packaging=${ARTIFACT_PACKAGING}
+artifact.sha256=${ARTIFACT_SHA256}
+git.commit=${gitCommit}
+git.branch=${params.BRANCH}
+jenkins.buildNumber=${env.BUILD_NUMBER}
+jenkins.job=${env.JOB_NAME}
+jenkins.buildUrl=${env.BUILD_URL}
+build.timestamp=${buildTimestamp}
+"""
+                    writeFile file: 'build-info.properties', text: buildInfo
+                    echo buildInfo
+                }
+            }
+        }
+
+        stage('Archive Artifact') {
+            steps {
+                archiveArtifacts artifacts: "${ARTIFACT_FILE}, ${ARTIFACT_FILE}.sha256, build-info.properties", fingerprint: true
+            }
+        }
+
+        // Publie exactement le jar verifie/analyse (deploy-file, pas de nouveau package).
+        // Le pom, le sha256 et build-info.properties sont deployes avec le jar.
+        // TODO: reactiver l'immutabilite des releases avant la mise en prod : passer la
+        //       "Deployment policy" du repo Nexus maven-releases sur "Disable redeploy".
+        //       Pour l'instant "Allow redeploy" permet d'ecraser une meme version.
+        stage('Publish to Nexus') {
+            steps {
+                configFileProvider([configFile(fileId: 'nexus-maven-settings', variable: 'MAVEN_SETTINGS')]) {
+                    withCredentials([usernamePassword(credentialsId: 'nexus-credentials', usernameVariable: 'NEXUS_USERNAME', passwordVariable: 'NEXUS_PASSWORD')]) {
+                        script {
+                            if (!env.NEXUS_URL) {
+                                error("Variable NEXUS_URL absente (definie via var.nexus_url dans le Terraform Jenkins)")
+                            }
+                            def repoId   = isSnapshotVersion ? 'nexus-snapshots' : 'nexus-releases'
+                            def repoName = isSnapshotVersion ? 'maven-snapshots' : 'maven-releases'
+                            def repoUrl  = "${env.NEXUS_URL}/repository/${repoName}/"
+                            echo "Publication vers ${repoId} : ${repoUrl}"
+
+                            def rc = sh(script: """
+                                mvn --settings \$MAVEN_SETTINGS -B org.apache.maven.plugins:maven-deploy-plugin:3.1.3:deploy-file \\
+                                    -DpomFile=pom.xml \\
+                                    -Dfile=${ARTIFACT_FILE} \\
+                                    -DrepositoryId=${repoId} \\
+                                    -Durl=${repoUrl} \\
+                                    -Dfiles=build-info.properties,${ARTIFACT_FILE}.sha256 \\
+                                    -Dclassifiers=build-info,sha256 \\
+                                    -Dtypes=properties,txt > target/nexus-publish.log 2>&1
+                            """, returnStatus: true)
+                            sh 'cat target/nexus-publish.log'
+                            if (rc != 0) {
+                                error("Publication Nexus en echec (code ${rc}) - voir target/nexus-publish.log")
+                            }
+                        }
+                    }
+                }
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'target/nexus-publish.log', allowEmptyArchive: true
+                }
+            }
+        }
+
+        stage('Verify Publication') {
+            steps {
+                withCredentials([usernamePassword(credentialsId: 'nexus-credentials', usernameVariable: 'NEXUS_USERNAME', passwordVariable: 'NEXUS_PASSWORD')]) {
+                    script {
+                        def jarUrl = sh(
+                            script: "grep -oE 'Uploaded to [^ ]+: [^ ]+\\.${ARTIFACT_PACKAGING}' target/nexus-publish.log | tail -1 | awk '{print \$4}'",
+                            returnStdout: true
+                        ).trim()
+                        if (!jarUrl) {
+                            error("URL de l'artefact publie introuvable dans target/nexus-publish.log")
+                        }
+
+                        sh "curl -fsS -u \"\$NEXUS_USERNAME:\$NEXUS_PASSWORD\" -o target/nexus-verify.bin \"${jarUrl}\""
+                        def remoteSha256 = sh(script: "sha256sum target/nexus-verify.bin | cut -d' ' -f1", returnStdout: true).trim()
+                        if (remoteSha256 != ARTIFACT_SHA256) {
+                            error("SHA-256 different apres publication : local=${ARTIFACT_SHA256} nexus=${remoteSha256}")
+                        }
+                        echo "Publication verifiee : ${jarUrl} (sha256=${remoteSha256})"
+
+                        // Version exacte publiee (horodatee pour un SNAPSHOT) : point d'entree du CD
+                        def fileName = jarUrl.tokenize('/').last()
+                        def publishedVersion = fileName.substring(ARTIFACT_ID.length() + 1, fileName.length() - ARTIFACT_PACKAGING.length() - 1)
+                        def artifactVersion = """\
+groupId=${ARTIFACT_GROUPID}
+artifactId=${ARTIFACT_ID}
+packaging=${ARTIFACT_PACKAGING}
+version=${VERSION}
+publishedVersion=${publishedVersion}
+url=${jarUrl}
+sha256=${ARTIFACT_SHA256}
+git.commit=${env.GIT_COMMIT}
+jenkins.buildNumber=${env.BUILD_NUMBER}
+"""
+                        writeFile file: 'artifact-version.properties', text: artifactVersion
+                        echo artifactVersion
+                    }
+                }
+                archiveArtifacts artifacts: 'artifact-version.properties', fingerprint: true
+            }
+        }
+
+        // Image = jar verifie (SHA-256 identique a Nexus) + Dockerfile, via BuildConfig binaire OpenShift.
+        // Poussee dans le registry interne (ImageStream). Tag immuable : <version>-<sha commit>-b<build>.
+        stage('Build Image') {
+            steps {
+                script {
+                    def gitShort = sh(script: 'git rev-parse --short=7 HEAD', returnStdout: true).trim()
+                    IMAGE_TAG = "${VERSION}-${gitShort}-b${env.BUILD_NUMBER}".toString()
+                    OPENSHIFT_NAMESPACE = sh(script: 'cat /var/run/secrets/kubernetes.io/serviceaccount/namespace', returnStdout: true).trim()
+
+                    sh """
+                        rm -rf target/image-context && mkdir -p target/image-context
+                        cp ${ARTIFACT_FILE} target/image-context/app.jar
+                        cp cicd/openshift/Dockerfile target/image-context/Dockerfile
+                    """
+
+                    withEnv(["IMAGE_NAME=${GITOPS_APP}", "IMAGE_TAG=${IMAGE_TAG}"]) {
+                        container('oc') {
+                            sh '''
+                                set -eu
+                                oc apply -f cicd/openshift/build.yaml
+                                oc start-build "bc/${IMAGE_NAME}" --from-dir=target/image-context --follow --wait
+                                oc tag "${IMAGE_NAME}:latest" "${IMAGE_NAME}:${IMAGE_TAG}"
+                                oc get istag "${IMAGE_NAME}:${IMAGE_TAG}" -o jsonpath='{.image.metadata.name}' > target/image-digest.txt
+                            '''
+                        }
+                    }
+                    IMAGE_DIGEST = readFile('target/image-digest.txt').trim()
+                    if (!IMAGE_DIGEST) {
+                        error("Image ${GITOPS_APP}:${IMAGE_TAG} introuvable dans le registry apres le build")
+                    }
+                    echo "Image poussee : ${OPENSHIFT_NAMESPACE}/${GITOPS_APP}:${IMAGE_TAG} (${IMAGE_DIGEST})"
+                }
+            }
+        }
+
+        // Ecrit le tag dans le depot GitOps (overlay de l'environnement) ; Argo CD synchronise ensuite.
+        //   develop -> overlays/dev  : commit direct sur main (deploiement automatique)
+        //   autres  -> branche promote/... a merger par PR (uat, preprod, prod)
+        stage('Update GitOps') {
+            steps {
+                script {
+                    def envByBranch = [develop: 'dev', uat: 'uat', preprod: 'preprod', main: 'prod']
+                    GITOPS_ENV = envByBranch[TARGET_BRANCH]
+                    def directCommit = (GITOPS_ENV == 'dev') ? 'true' : 'false'
+
+                    withCredentials([usernamePassword(credentialsId: 'gitops-git-credentials', usernameVariable: 'GITOPS_USER', passwordVariable: 'GITOPS_TOKEN')]) {
+                        withEnv(["GITOPS_URL=${GITOPS_URL}", "GITOPS_APP=${GITOPS_APP}", "GITOPS_ENV=${GITOPS_ENV}",
+                                 "IMAGE_TAG=${IMAGE_TAG}", "DIRECT_COMMIT=${directCommit}"]) {
+                            sh '''
+                                set -eu
+                                # Identifiants fournis via GIT_ASKPASS : rien dans l'URL ni dans les logs
+                                ASKPASS="$(pwd)/target/git-askpass.sh"
+                                cat > "$ASKPASS" <<'EOF'
+#!/bin/sh
+case "$1" in
+  Username*) printf '%s' "$GITOPS_USER" ;;
+  *)         printf '%s' "$GITOPS_TOKEN" ;;
+esac
+EOF
+                                chmod 700 "$ASKPASS"
+                                export GIT_ASKPASS="$ASKPASS" GIT_TERMINAL_PROMPT=0
+
+                                rm -rf target/gitops
+                                git clone --depth 1 --branch main "$GITOPS_URL" target/gitops
+                                cd target/gitops
+
+                                OVERLAY="apps/${GITOPS_APP}/overlays/${GITOPS_ENV}/kustomization.yaml"
+                                [ -f "$OVERLAY" ] || { echo "Overlay introuvable dans le depot GitOps : $OVERLAY"; exit 1; }
+
+                                sed -i -E "s|^([[:space:]]*newTag:).*|\\1 ${IMAGE_TAG}|" "$OVERLAY"
+                                grep -q "newTag: ${IMAGE_TAG}$" "$OVERLAY" || { echo "Mise a jour de newTag impossible dans $OVERLAY"; exit 1; }
+
+                                if git diff --quiet; then
+                                    echo "GitOps deja a jour (${IMAGE_TAG})"
+                                    git rev-parse HEAD > ../gitops-commit.txt
+                                    exit 0
+                                fi
+
+                                git -c user.name="jenkins-ci" -c user.email="jenkins-ci@users.noreply.github.com" \\
+                                    commit -q -am "chore(${GITOPS_APP}): ${GITOPS_ENV} -> ${IMAGE_TAG} [build ${BUILD_NUMBER}]"
+                                git rev-parse HEAD > ../gitops-commit.txt
+
+                                if [ "$DIRECT_COMMIT" = "true" ]; then
+                                    pushed=0
+                                    for attempt in 1 2 3; do
+                                        if git push -q origin HEAD:main; then pushed=1; break; fi
+                                        git pull -q --rebase origin main
+                                    done
+                                    [ "$pushed" = "1" ] || { echo "Push GitOps en echec apres 3 tentatives"; exit 1; }
+                                    echo "GitOps mis a jour : ${GITOPS_APP} ${GITOPS_ENV} -> ${IMAGE_TAG}"
+                                else
+                                    PROMOTE_BRANCH="promote/${GITOPS_APP}-${GITOPS_ENV}-${IMAGE_TAG}"
+                                    git push -q origin "HEAD:refs/heads/${PROMOTE_BRANCH}"
+                                    echo "Branche ${PROMOTE_BRANCH} poussee : ouvrir une Pull Request vers main pour deployer en ${GITOPS_ENV}"
+                                fi
+                            '''
+                        }
+                    }
+
+                    def gitopsCommit = readFile('target/gitops-commit.txt').trim()
+                    def imageVersion = """\
+image=image-registry.openshift-image-registry.svc:5000/${OPENSHIFT_NAMESPACE}/${GITOPS_APP}
+tag=${IMAGE_TAG}
+digest=${IMAGE_DIGEST}
+gitops.environment=${GITOPS_ENV}
+gitops.commit=${gitopsCommit}
+artifact.version=${VERSION}
+artifact.sha256=${ARTIFACT_SHA256}
+jenkins.buildNumber=${env.BUILD_NUMBER}
+"""
+                    writeFile file: 'image-version.properties', text: imageVersion
+                    echo imageVersion
+                }
+                archiveArtifacts artifacts: 'image-version.properties', fingerprint: true
+            }
+        }
+    }
+
+    post {
+        always {
+            echo 'clean up our workspace'
+            deleteDir()
+        }
+        success {
+            script {
+                if (NOTIFICATION_MAIL) {
+                    try {
+                        mail to: NOTIFICATION_MAIL,
+                             subject: "[${APPLICATION_NAME}] BUILD SUCCESS #${env.BUILD_NUMBER} (${params.BRANCH})",
+                             body: """\
+Build reussi.
+
+Application : ${APPLICATION_NAME}
+Branche     : ${params.BRANCH}
+Version     : ${VERSION}
+Build       : ${env.BUILD_NUMBER}
+Commit      : ${env.GIT_COMMIT}
+URL         : ${env.BUILD_URL}
+"""
+                    } catch (Exception e) {
+                        echo "Envoi du mail de notification impossible (SMTP non configure sur Jenkins ?) : ${e.getMessage()}"
+                    }
+                } else {
+                    echo "Notification email non envoyee : notification.email n'est pas renseigne dans cicd/jenkins.properties."
+                }
+            }
+        }
+        failure {
+            script {
+                if (NOTIFICATION_MAIL) {
+                    try {
+                        mail to: NOTIFICATION_MAIL,
+                             subject: "[${APPLICATION_NAME}] BUILD FAILURE #${env.BUILD_NUMBER} (${params.BRANCH})",
+                             body: """\
+Le build a echoue.
+
+Application : ${APPLICATION_NAME}
+Branche     : ${params.BRANCH}
+Build       : ${env.BUILD_NUMBER}
+Commit      : ${env.GIT_COMMIT}
+Logs        : ${env.BUILD_URL}console
+"""
+                    } catch (Exception e) {
+                        echo "Envoi du mail de notification impossible (SMTP non configure sur Jenkins ?) : ${e.getMessage()}"
+                    }
+                } else {
+                    echo "Notification email non envoyee : notification.email n'est pas renseigne dans cicd/jenkins.properties."
+                }
+            }
+        }
+    }
+}
