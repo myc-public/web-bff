@@ -71,7 +71,11 @@ session sans token, les erreurs (401, 404, 409, 502, 503), la deconnexion, le ba
 refresh (refresh unique, attente et relecture, delai, erreur reseau), le registre `sid` (suppression ciblee, rejeu
 `jti`) et la validation de la configuration. Redis, Keycloak et plusieurs replicas reels : mode pile (SEC-BFF).
 
-## Image
+## CI/CD et image
+
+Job Jenkins `web-bff` ([`cicd/Jenkinsfile-ci`](cicd/Jenkinsfile-ci)) : build, tests, SonarCloud, jar publie dans Nexus,
+image (BuildConfig), puis mise a jour du tag dans `gitops-platform` (`apps/web-bff/overlays/dev`), synchronise par
+Argo CD avec le Redis des sessions.
 
 `cicd/openshift/Dockerfile` : UBI 8 OpenJDK 21 runtime, `USER 185`, `-XX:MaxRAMPercentage=75`, contexte = le jar seul
 (`.dockerignore`). Meme Dockerfile en CI (BuildConfig) et en mode pile (`gitops-platform/local/stack`, instance
