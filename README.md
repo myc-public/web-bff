@@ -7,7 +7,7 @@ opaque `__Host-SESSION`. Une image, une instance par realm : `web-bff-customers`
 
 Flux : Navigateur -> APISIX externe + WAF -> `/bff/**` -> **web-bff** -> APISIX interne -> donation-api ; connexion
 par Keycloak (client `web-bff`, code + PKCE S256). Decisions : ADR K6 DB1 a DB11 et resultats du spike du 13/10
-(`jenkins-on-openshift-with-terraform/docs/ROADMAP.md`). Tests de securite : `inner-donation-api/postman/PLAN-DE-TEST-E2E.md`
+(ADR 0026 et 0027 de `platform-handbook` : https://github.com/myc-public/platform-handbook/blob/develop/adr/README.md). Tests de securite : `inner-donation-api/postman/PLAN-DE-TEST-E2E.md`
 sections 5.9 et 5.10.
 
 ## Contrat avec les fronts
