@@ -7,7 +7,7 @@ opaque `__Host-SESSION`. Une image, une instance par realm : `web-bff-customers`
 
 Flux : Navigateur -> APISIX externe + WAF -> `/bff/**` -> **web-bff** -> APISIX interne -> donation-api ; connexion
 par Keycloak (client `web-bff`, code + PKCE S256). Decisions : ADR K6 DB1 a DB11 et resultats du spike du 13/10
-(`jenkins-on-openshift-with-terraform/docs/ROADMAP.md`). Tests de securite : `inner-donation-api/postman/PLAN-DE-TEST-E2E.md`
+(ADR 0026 et 0027 de `platform-handbook` : https://github.com/myc-public/platform-handbook/blob/develop/adr/README.md). Tests de securite : `inner-donation-api/postman/PLAN-DE-TEST-E2E.md`
 sections 5.9 et 5.10.
 
 ## Contrat avec les fronts
@@ -71,7 +71,11 @@ session sans token, les erreurs (401, 404, 409, 502, 503), la deconnexion, le ba
 refresh (refresh unique, attente et relecture, delai, erreur reseau), le registre `sid` (suppression ciblee, rejeu
 `jti`) et la validation de la configuration. Redis, Keycloak et plusieurs replicas reels : mode pile (SEC-BFF).
 
-## Image
+## CI/CD et image
+
+Job Jenkins `web-bff` ([`cicd/Jenkinsfile-ci`](cicd/Jenkinsfile-ci)) : build, tests, SonarCloud, jar publie dans Nexus,
+image (BuildConfig), puis mise a jour du tag dans `gitops-platform` (`apps/web-bff/overlays/dev`), synchronise par
+Argo CD avec le Redis des sessions.
 
 `cicd/openshift/Dockerfile` : UBI 8 OpenJDK 21 runtime, `USER 185`, `-XX:MaxRAMPercentage=75`, contexte = le jar seul
 (`.dockerignore`). Meme Dockerfile en CI (BuildConfig) et en mode pile (`gitops-platform/local/stack`, instance
